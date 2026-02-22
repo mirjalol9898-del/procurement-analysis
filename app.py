@@ -57,12 +57,7 @@ def parse_kp(file_bytes: bytes):
         max_score = -1
         for sheet_name, df_sheet in all_sheets.items():
             # Берем первые 50 строк для анализа
-            text_sample = (
-                df_sheet.head(50)
-                .astype(str)
-                .apply(lambda x: " ".join(x).lower(), axis=1)
-                .str.cat(sep=" ")
-            )
+            text_sample = ' '.join([str(val).lower() for val in df_sheet.head(50).values.flatten()])
 
             score = 0
             # Обязательные поля - даем им огромный вес!
@@ -132,7 +127,7 @@ def parse_kp(file_bytes: bytes):
     # Ищем шапку таблицы (строку, где есть хотя бы 2 ключевых слова)
     header_row = None
     for r in range(min(50, len(df))):
-        row_text = " ".join(df.iloc[r].astype(str).str.lower())
+        row_text = ' '.join([str(val).lower() for val in df.iloc[r].values])
         matches = 0
         if re.search(
             r"наименование|name|description|описание|товар|услуг|item", row_text
