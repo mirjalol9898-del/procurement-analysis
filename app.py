@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from typing import List
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
@@ -801,9 +802,9 @@ def process_file(file_bytes: bytes):
 
 @app.post("/analyze")
 async def analyze(
-    files: list[UploadFile] = File(...),
-    check_anomaly: bool = False,
-    anomaly_percent: int = 50,
+    files: List[UploadFile] = File(...),
+    check_anomaly: bool = Form(False),
+    anomaly_percent: int = Form(50),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="Загрузи минимум 1 КП")
