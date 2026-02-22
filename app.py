@@ -48,30 +48,109 @@ def detect_currency(df) -> str:
 
 
 def parse_kp(file_bytes: bytes):
-    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, header=None)
+    # Читаем сразу ВСЕ листы
+    all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
+
+    # Умный поиск нужного листа
+    best_sheet_name = list(all_sheets.keys())[0]
+    if len(all_sheets) > 1:
+        max_score = -1
+        for sheet_name, df_sheet in all_sheets.items():
+            # Берем первые 50 строк для анализа
+            text_sample = (
+                df_sheet.head(50)
+                .astype(str)
+                .apply(lambda x: " ".join(x).lower(), axis=1)
+                .str.cat(sep=" ")
+            )
+
+            score = 0
+            # Обязательные поля - даем им огромный вес!
+            if re.search(r"закупочной процедуры|procurement|tender", text_sample):
+                score += 100
+            if re.search(r"участник|participant|bidder|vendor", text_sample):
+                score += 100
+
+            # Второстепенные слова
+            anchors = [
+                "наименование",
+                "описание",
+                "кол-во",
+                "количество",
+                "цена",
+                "сумма",
+                "итого",
+                "total",
+                "price",
+                "qty",
+            ]
+            score += sum(5 for anchor in anchors if anchor in text_sample)
+
+            if score > max_score:
+                max_score = score
+                best_sheet_name = sheet_name
+
+    df = all_sheets[best_sheet_name]
     currency = detect_currency(df)
 
-    zp_row = find_row(
-        df,
-        0,
-        r"Название Закупочной процедуры|Name of.*[Pp]rocurement|Tender Name|Procurement procedure name",
+    # Функция для гибкого поиска (ищет в первых 4-х колонках, а не только жестко в 0-й)
+    def find_field(pattern):
+        for c in range(min(4, len(df.columns))):
+            idx = df[
+                df[c]
+                .astype(str)
+                .str.contains(pattern, na=False, case=False, regex=True)
+            ].index
+            if len(idx):
+                r = int(idx[0])
+                # Значение ищем в ячейках правее
+                for val_col in range(c + 1, len(df.columns)):
+                    val = clean(df.iloc[r, val_col])
+                    if val and val != ":":
+                        return r, val
+                # Фолбэк, если правее почему-то пусто
+                return r, clean(df.iloc[r, 2])
+        return None, None
+
+    zp_row, zp_name = find_field(
+        r"Название Закупочной процедуры|Name of.*[Pp]rocurement|Tender Name|Procurement procedure name"
     )
     if zp_row is None:
-        raise ValueError("В КП не найдено Название процедуры")
-    zp_name = clean(df.iloc[zp_row, 2])
+        raise ValueError(
+            f"В КП (на листе '{best_sheet_name}') не найдено Название процедуры."
+        )
 
-    p_row = find_row(
-        df,
-        0,
-        r"Участник Закупочной процедуры|Participant.*[Pp]rocurement|Bidder|Vendor|Supplier|Procurement procedure participant",
+    p_row, participant = find_field(
+        r"Участник Закупочной процедуры|Participant.*[Pp]rocurement|Bidder|Vendor|Supplier|Procurement procedure participant"
     )
     if p_row is None:
-        raise ValueError("В КП не найдено имя Участника")
-    participant = clean(df.iloc[p_row, 2])
+        raise ValueError(
+            f"В КП (на листе '{best_sheet_name}') не найдено имя Участника."
+        )
 
-    header_row = find_row(df, 1, r"Наименование|Name|Description|Item")
+    # Ищем шапку (Наименование/Name) в первых 4 колонках
+    # Ищем шапку таблицы (строку, где есть хотя бы 2 ключевых слова)
+    header_row = None
+    for r in range(min(50, len(df))):
+        row_text = " ".join(df.iloc[r].astype(str).str.lower())
+        matches = 0
+        if re.search(
+            r"наименование|name|description|описание|товар|услуг|item", row_text
+        ):
+            matches += 1
+        if re.search(r"кол-во|количество|qty|quantity|объем", row_text):
+            matches += 1
+        if re.search(r"цена|price|расценка", row_text):
+            matches += 1
+
+        if matches >= 2:
+            header_row = r
+            break
+
     if header_row is None:
-        raise ValueError("В КП не найдена шапка таблицы")
+        raise ValueError(
+            f"В КП (на листе '{best_sheet_name}') не найдена шапка таблицы"
+        )
 
     headers = df.iloc[header_row].astype(str).str.lower()
     col_name = headers[
@@ -342,7 +421,14 @@ def generate_excel(parsed, check_anomaly=False, anomaly_percent=50):
         }
     )
     fmt_total = wb.add_format(
-        {"font_name": font, "border": 1, "bold": True, "font_size": 9, "align": "right"}
+        {
+            "font_name": font,
+            "border": 1,
+            "bold": True,
+            "font_size": 9,
+            "align": "right",
+            "num_format": "#,##0.00",
+        }
     )
     fmt_lot_hdr = wb.add_format(
         {
@@ -436,6 +522,7 @@ def generate_excel(parsed, check_anomaly=False, anomaly_percent=50):
             "font_size": 9,
             "align": "right",
             "bg_color": med_bg,
+            "num_format": "#,##0.00",
         }
     )
     fmt_cond_txt_med = wb.add_format(
