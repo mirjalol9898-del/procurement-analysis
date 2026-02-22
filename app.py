@@ -9,6 +9,16 @@ import asyncio
 
 app = FastAPI(title="Fin Analysis Generator (Improved)")
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Разрешает запросы с любых сайтов/HTML-файлов
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 CONFIRM_SET = {"да", "yes", "+"}
 
 
