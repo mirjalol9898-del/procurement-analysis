@@ -169,10 +169,20 @@ def parse_kp(file_bytes: bytes):
         headers.str.contains(r"цена|price|расценка|unit price", na=False, regex=True)
     ].index.min()
 
-    col_name = col_name if pd.notna(col_name) else 1
-    col_uom = col_uom if pd.notna(col_uom) else 4
-    col_qty = col_qty if pd.notna(col_qty) else 5
-    col_price = col_price if pd.notna(col_price) else 6
+    col_name = int(col_name) if pd.notna(col_name) else 1
+    col_uom = int(col_uom) if pd.notna(col_uom) else None  # нет колонки — пишем пусто
+    if pd.isna(col_qty):
+        raise ValueError(
+            f"В КП (лист '{best_sheet_name}') не найдена колонка «Количество». "
+            f"Убедитесь что в шапке таблицы есть заголовок: Quantity / Кол-во / Количество / Qty"
+        )
+    col_qty = int(col_qty)
+    if pd.isna(col_price):
+        raise ValueError(
+            f"В КП (лист '{best_sheet_name}') не найдена колонка «Цена». "
+            f"Убедитесь что в шапке таблицы есть заголовок: Price / Цена / Unit price"
+        )
+    col_price = int(col_price)
 
     goods = []
     has_lots = False
@@ -258,7 +268,7 @@ def parse_kp(file_bytes: bytes):
             continue
 
         if no or name:
-            uom = clean(df.iloc[i, col_uom]) if pd.notna(col_uom) else ""
+            uom = clean(df.iloc[i, col_uom]) if col_uom is not None else ""
             qty = pd.to_numeric(df.iloc[i, col_qty], errors="coerce")
             price = pd.to_numeric(df.iloc[i, col_price], errors="coerce")
             goods.append(
