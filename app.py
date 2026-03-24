@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CONFIRM_SET = {"да", "yes", "+"}
+CONFIRM_SET = {"да", "yes", "+", "compliant", "согласен", "согласна", "agree", "agreed", "ok", "ок"}
 
 
 def clean(x):
@@ -116,7 +116,7 @@ def parse_kp(file_bytes: bytes):
         )
 
     p_row, participant = find_field(
-        r"Участник Закупочной процедуры|Participant.*[Pp]rocurement|Bidder|Vendor|Supplier|Procurement procedure participant"
+        r"^Участник$|^Participant$|^Competition participant$|Участник Закупочной процедуры|Bidder|Vendor"
     )
     if p_row is None:
         raise ValueError(
@@ -237,6 +237,15 @@ def parse_kp(file_bytes: bytes):
             has_items = any(g["type"] == "item" for g in goods)
 
             if is_explicit_lot:
+                # Если предыдущий лот есть и у него нет lot_total — добавляем авто-итог
+                if has_lots and has_items:
+                    # Проверяем: последний элемент — не lot_total?
+                    last_non_empty = next(
+                        (g for g in reversed(goods) if g["type"] in ("item", "lot_total", "lot_header")),
+                        None
+                    )
+                    if last_non_empty and last_non_empty["type"] != "lot_total":
+                        goods.append({"type": "lot_total", "name": "Итого", "auto": True})
                 has_lots = True
                 goods.append({"type": "lot_header", "name": display_name})
             elif not has_items and len(display_name) < 100:
@@ -268,44 +277,87 @@ def parse_kp(file_bytes: bytes):
     if not goods:
         raise ValueError("В КП не найдено товарных строк")
 
-    condition_map = {
-        "Срок поставки": r"срок поставки|delivery time|delivery period|lead time",
-        "Условия оплаты": r"условия оплаты|payment terms|terms of payment",
-        "Гарантия": r"гарантия|warranty|guarantee",
-        "Условия поставки": r"условия поставки|delivery terms|terms of delivery",
+    # Авто-итог для последнего лота если нет явного lot_total
+    if has_lots:
+        last_non_empty = next(
+            (g for g in reversed(goods) if g["type"] in ("item", "lot_total", "lot_header")),
+            None
+        )
+        if last_non_empty and last_non_empty["type"] == "item":
+            goods.append({"type": "lot_total", "name": "Итого", "auto": True})
+
+    # --- ДИНАМИЧЕСКИЙ ПАРСИНГ УСЛОВИЙ ---
+    # Стоп-строки которые НЕ являются условиями
+    COND_STOP = {
+        "positions marked", "full name", "signature", "stamped",
+        "note:", "примечание", "заверяется", "подпись"
+    }
+    # Известные метки → русский перевод для заголовка в отчёте
+    KNOWN_LABELS = {
+        r"срок поставки|delivery time|delivery period|lead time": "Срок поставки",
+        r"условия оплаты|payment terms|terms of payment": "Условия оплаты",
+        r"гарантия|warranty|guarantee": "Гарантия",
+        r"условия поставки|delivery terms|terms of delivery|incoterms": "Условия поставки",
     }
 
-    cond_final = {}
-    for ru_lab, pattern in condition_map.items():
-        r, c_label = None, None
-        for idx in range(i, len(df)):
-            for c in range(min(3, len(df.columns))):
-                val = clean(df.iloc[idx, c]).lower()
-                if pd.Series([val]).str.contains(pattern, regex=True).iloc[0]:
-                    r = idx
-                    c_label = c
-                    break
-            if r is not None:
-                break
+    cond_final = {}  # {ru_label: value}
 
-        if r is None:
-            cond_final[ru_lab] = ""
+    # Сканируем строки ПОСЛЕ товарной таблицы
+    for idx in range(i, len(df)):
+        # Ищем ярлык в первых 3 колонках
+        c_label = None
+        label_text_raw = ""
+        for c in range(min(3, len(df.columns))):
+            val = clean(df.iloc[idx, c])
+            if not val:
+                continue
+            val_lower = val.lower()
+            # Пропускаем стоп-строки
+            if any(stop in val_lower for stop in COND_STOP):
+                break
+            # Это похоже на ярлык условия если:
+            # - в строке есть хоть одно непустое значение правее
+            # - сама ячейка не выглядит как длинный текст (< 60 символов)
+            if len(val) < 80:
+                row_vals_check = [
+                    clean(x) for x in df.iloc[idx].values[c + 1:] if clean(x) != ""
+                ]
+                if row_vals_check:
+                    c_label = c
+                    label_text_raw = val
+                    break
+
+        if c_label is None:
             continue
 
-        # Берем значения только ПРАВЕЕ ярлыка
+        label_lower = label_text_raw.lower()
+
+        # Определяем русское название
+        ru_lab = None
+        for pattern, ru_name in KNOWN_LABELS.items():
+            if re.search(pattern, label_lower):
+                ru_lab = ru_name
+                break
+        # Если не распознали — используем оригинальный текст ярлыка как есть
+        if ru_lab is None:
+            ru_lab = label_text_raw.strip()
+
+        # Пропускаем дубли
+        if ru_lab in cond_final:
+            continue
+
+        # Берём значения правее ярлыка
         row_vals = [
-            clean(x) for x in df.iloc[r].values[c_label + 1 :] if clean(x) != ""
+            clean(x) for x in df.iloc[idx].values[c_label + 1:] if clean(x) != ""
         ]
 
         if not row_vals:
-            cond_final[ru_lab] = ""
-        elif len(row_vals) == 1:
-            # Если значение всего одно, проверяем, не согласие ли это (Да/Yes/+)
+            continue
+
+        if len(row_vals) == 1:
             if is_confirmed(row_vals[0]):
-                label_text = clean(df.iloc[r, c_label])
-                # Пробуем вытащить требование из самой ячейки заголовка, если там есть двоеточие
-                if ":" in label_text:
-                    cond_final[ru_lab] = label_text.split(":", 1)[1].strip()
+                if ":" in label_text_raw:
+                    cond_final[ru_lab] = label_text_raw.split(":", 1)[1].strip()
                 else:
                     cond_final[ru_lab] = "Согласен (требование не указано)"
             else:
@@ -719,7 +771,13 @@ def generate_excel(parsed, check_anomaly=False, anomaly_percent=50):
 
     if has_conditions:
         cond_start = total_row + 3
-        labels = ["Срок поставки", "Условия оплаты", "Гарантия", "Условия поставки"]
+        # Собираем все уникальные ярлыки условий из всех участников (сохраняя порядок)
+        seen = {}
+        for p in parsed:
+            for lab in p["cond_final"].keys():
+                if lab not in seen:
+                    seen[lab] = True
+        labels = list(seen.keys())
 
         for j, lab in enumerate(labels):
             rr = cond_start + j
